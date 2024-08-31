@@ -1,0 +1,1772 @@
+#%% ##### Classification of Sex and Age Based on Electroencephalographic Features Measured with MEG Using Various Artificial Intelligence Models #####
+
+#%% ##### 0.   PREPARATION #####
+#%% ###   0.1. INSTALLATIONS ###
+# Uncomment the following for first time installation
+#!pip install tensorflow keras-tuner scikeras lime seaborn --upgrade
+
+#%% ###   0.2. LOAD NECESSARY PACKAGES ###
+import pandas                       as pd
+import tensorflow                   as tf
+import numpy                        as np
+import random                       as python_random
+import matplotlib.pyplot            as plt
+import seaborn                      as sns
+import joblib
+import warnings
+import os
+import random
+
+from types                          import SimpleNamespace
+from contextlib                     import contextmanager
+from tqdm                           import tqdm
+from sklearn.model_selection        import train_test_split, RandomizedSearchCV
+from sklearn.preprocessing          import StandardScaler
+from sklearn.linear_model           import LinearRegression, Lasso, Ridge, ElasticNet
+from sklearn.kernel_ridge           import KernelRidge
+from sklearn.ensemble               import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.metrics                import (mean_absolute_error, mean_squared_error, r2_score)
+from sklearn.svm                    import SVR
+from sklearn.neighbors              import KNeighborsRegressor
+from sklearn.tree                   import DecisionTreeRegressor
+from sklearn.neural_network         import MLPRegressor
+from sklearn.inspection             import permutation_importance
+from tensorflow.keras.models        import Sequential
+from tensorflow.keras.layers        import Dense, Dropout, Input
+from tensorflow.keras.optimizers    import Adam
+from tensorflow.keras.regularizers  import l2
+from scikeras.wrappers              import KerasRegressor
+from tensorflow.keras.callbacks     import EarlyStopping
+from tensorflow.keras.optimizers.schedules import ExponentialDecay
+
+#%% ###   0.3. CONFIGURATION PARAMETERS ###
+config = SimpleNamespace(
+    seed                              = 42,
+    clipping                          = True,
+    path      = SimpleNamespace(
+        data                          = "G:/Mi Unidad/Python/datos_sujetos.xlsx"   
+    ),
+    plot      = SimpleNamespace(
+        barColors                     = ['lightblue', 'lightsalmon'],
+        size                          = (12,5)
+    ),
+    test      = SimpleNamespace(
+        size                          = 0.2
+    ),
+    feature_importances               = True,
+    demographics                      = False,
+    precalcHyperparams                = True,  # False if you want to calculate again the best hyperparameters, true for using previously calculated ones
+    perform_model  = SimpleNamespace(
+        linear_regression             = True,
+        nnls_linear_regression        = False,
+        lasso_regression              = True,
+        ridge_regression              = True,
+        elasticnet_regression         = True,
+        kernelridge_regression        = True,
+        svr                           = True,
+        gradient_boosting_regression  = True,
+        mlp_regression                = True,
+        random_forest_regression      = True,
+        kneighbors_regression         = False,
+        decision_tree_regression      = False,
+        fcnn_two_layers               = True,
+        fcnn_three_layers             = True
+    )
+)
+
+#%% ###   0.4. FUNCTIONS ###
+### FUNCTION TO PLOT REAL VS. PREDICTED VALUES + RESIDUALS
+def plot_predictions_and_residuals(regressor, X_train, y_train, X_test, y_test, model_name, config):
+    regressor.fit(X_train, y_train)
+    y_pred = regressor.predict(X_test)
+    
+    if config.clipping:
+        y_pred = np.clip(y_pred, 0, None)  # Replace negative values with 0
+        
+    # Performance metrics
+    mse  = mean_squared_error(y_test, y_pred)
+    rmse = np.sqrt(mse)
+    mae  = mean_absolute_error(y_test, y_pred)
+    r2   = r2_score(y_test, y_pred)
+    
+    # Plotting
+    fig, axs = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Real vs Predicted
+    axs[0].scatter(y_test, y_pred, alpha=0.5, color='blue')
+    axs[0].plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'k--', lw=2)
+    axs[0].set_title(f'Real vs Predicted Age - {model_name}')
+    axs[0].set_xlabel('Real Age')
+    axs[0].set_ylabel('Predicted Age')
+    axs[0].grid(True)
+    
+    # Residuals
+    residuals = y_test - y_pred
+    axs[1].scatter(y_pred, residuals, alpha=0.5, color='purple')
+    axs[1].hlines(0, xmin=y_pred.min(), xmax=y_pred.max(), color='purple', linestyle='--')
+    axs[1].set_title(f'Residuals - {model_name}')
+    axs[1].set_xlabel('Predicted Age')
+    axs[1].set_ylabel('Residuals')
+    axs[1].grid(True)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Print performance metrics
+    print(f'Model : {model_name}')
+    print(f'MSE   : {mse:.2f}')
+    print(f'RMSE  : {rmse:.2f}')
+    print(f'MAE   : {mae:.2f}')
+    print(f'R^2   : {r2:.3f}')
+    
+    if config.feature_importances:
+        # Feature importance
+        feature_importances = None
+        
+        if hasattr(regressor, 'coef_'):
+            feature_importances = regressor.coef_
+        elif hasattr(regressor, 'feature_importances_'):
+            feature_importances = regressor.feature_importances_    
+        else:
+            perm_importance     = permutation_importance(regressor, X_test, y_test, n_repeats=30, random_state=config.seed)
+            feature_importances = perm_importance.importances_mean
+            
+        if feature_importances is not None:
+            if isinstance(X_train, pd.DataFrame):
+                features = X_train.columns
+            else:
+                features = np.arange(X_train.shape[1])
+    
+            # Ensure the length matches
+            if len(feature_importances) == len(features):
+                importance_df = pd.Series(feature_importances, index=features).sort_values(key=abs, ascending=False)
+                importance_df = abs(importance_df)
+    
+                # Plot feature importances
+                plt.figure(figsize=(10, 6))
+                sns.barplot(x=importance_df.head(20), y=importance_df.index[:20], palette='viridis')
+                plt.title(f'Top 20 Most Important Features in {model_name}')
+                plt.xlabel('Absolute Feature Importance')
+                plt.ylabel('Features')
+                plt.tight_layout()
+                plt.show()
+            else:
+                print(f"Warning: Length of feature importances ({len(feature_importances)}) does not match length of features ({len(features)})")
+                perm_importance     = permutation_importance(regressor, X_test, y_test, n_repeats=30, random_state=config.seed)
+                feature_importances = perm_importance.importances_mean
+                    
+                importance_df = pd.Series(feature_importances, index=features).sort_values(key=abs, ascending=False)
+                importance_df = abs(importance_df)
+    
+                # Plot feature importances
+                plt.figure(figsize=(10, 6))
+                sns.barplot(x=importance_df.head(20), y=importance_df.index[:20], palette='viridis')
+                plt.title(f'Top 20 Most Important Features in {model_name}')
+                plt.xlabel('Absolute Feature Importance')
+                plt.ylabel('Features')
+                plt.tight_layout()
+                plt.show()
+        else:
+            print(f"{model_name} does not provide feature importances.")
+        
+### PROGRESS BAR FOR RandomizedSearchCV
+@contextmanager
+def tqdm_joblib(tqdm_object):
+    """Context manager to patch joblib to report into tqdm progress bar given as argument."""
+    class TqdmBatchCompletionCallback(joblib.parallel.BatchCompletionCallBack):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.tqdm_object = tqdm_object
+
+        def __call__(self, *args, **kwargs):
+            self.tqdm_object.update(n=self.batch_size)
+            return super().__call__(*args, **kwargs)
+
+    old_callback = joblib.parallel.BatchCompletionCallBack
+    joblib.parallel.BatchCompletionCallBack = TqdmBatchCompletionCallback
+
+    try:
+        yield tqdm_object
+    finally:
+        joblib.parallel.BatchCompletionCallBack = old_callback
+        tqdm_object.close()
+
+### FUNCTION TO FIND BEST PARAMETERS ###
+def perform_randomized_search(param_distributions, model, n_iter, cv, seed, X_train, y_train, n_jobs=-1):  
+    tf.random.set_seed(config.seed)
+    
+    # Initialize RandomizedSearchCV
+    random_search = RandomizedSearchCV(
+        estimator           = model,
+        param_distributions = param_distributions,
+        n_iter              = n_iter,
+        cv                  = cv,
+        random_state        = seed,
+        n_jobs              = n_jobs
+    )
+
+    # Fit the randomized search with tqdm progress bar
+    with tqdm_joblib(tqdm(desc="RandomizedSearchCV", total=n_iter * cv)):
+        random_search.fit(X_train, y_train)
+
+    return random_search
+
+### FUNCTION TO SHOW RESULTS AND PLOT ###
+def extract_results_and_plot(random_search, param_distributions):
+    # Get the model name from the model instance
+    model_name = random_search.estimator.__class__.__name__
+
+    # Retrieve the results
+    results = random_search.cv_results_
+
+    # Extract mean test scores
+    mean_test_scores = results['mean_test_score']
+
+    # Create a string of parameter names with their lengths
+    param_lengths = {k: len(v) for k, v in param_distributions.items()}
+    param_lengths_str = ", ".join([f"{k} ({v})" for k, v in param_lengths.items()])
+
+    # Extract results from the RandomizedSearchCV
+    results_df = pd.DataFrame(random_search.cv_results_)
+
+    # Get the parameter names from the param_distributions keys
+    param_names = list(param_distributions.keys())
+
+    # Create a new DataFrame with parameter values and mean test scores
+    param_values        = results_df[[f"param_{name}" for name in param_names]].apply(pd.to_numeric)
+    mean_test_scores_df = pd.DataFrame({'mean_test_score': mean_test_scores})
+    results_df_ordered  = pd.concat([param_values, mean_test_scores_df], axis=1)
+
+    # Sort the results based on the parameter values
+    results_df_ordered.sort_values(by=[f"param_{name}" for name in param_names], inplace=True)
+
+    # Retrieve the best parameters and model
+    best_params = random_search.best_params_
+    print("Best Parameters for the Model:")
+    print(best_params)
+
+    mean_test_scores_ordered = results_df_ordered['mean_test_score'].values
+    mean_test_scores_ordered[mean_test_scores_ordered < 0] = 0
+
+    # Plot the mean test scores to check for stability
+    plt.figure(figsize=(10, 6))
+    plt.plot(range(1, len(mean_test_scores_ordered) + 1), mean_test_scores_ordered, marker='o')
+    plt.xlabel('Iteration')
+    plt.ylabel('Mean Test Score')
+    plt.title(f'Cross-Validation Score Stability for {model_name}')
+    plt.suptitle(f'Parameters used: {param_lengths_str}', fontsize=10, y=0.95)
+    plt.grid(True)
+    plt.show()
+
+    # Sort results by mean_test_score in descending order
+    sorted_results = results_df.sort_values(by='mean_test_score', ascending=False)
+
+    # Move the first four columns to the end
+    first_four_columns = sorted_results.columns[:4].tolist()
+    remaining_columns  = sorted_results.columns[4:].tolist()
+    new_column_order   = remaining_columns + first_four_columns
+    sorted_results     = sorted_results[new_column_order]
+
+    # Sort the parameter columns based on the order in param_distributions
+    param_columns         = ["param_" + col for col in param_distributions.keys()]
+    sorted_param_columns  = sorted(param_columns, key=lambda x: list(param_distributions.keys()).index(x.split("_", 1)[1]))
+    non_param_columns     = [col for col in sorted_results.columns if col not in param_columns]
+    final_column_order    = sorted_param_columns + non_param_columns
+    sorted_results        = sorted_results[final_column_order]
+
+    # Move "mean_test_score" and "std_test_score" columns to the first and second positions
+    mean_test_score_column = sorted_results.pop("mean_test_score")
+    std_test_score_column  = sorted_results.pop("std_test_score")
+    sorted_results.insert(0, "mean_test_score", mean_test_score_column)
+    sorted_results.insert(1, "std_test_score", std_test_score_column)
+    
+    return best_params, sorted_results
+
+### FUNCTION TO FIND BEST PARAMETERS, SHOW RESULTS, AND PLOT ###
+def perform_randomized_search_results_and_plot(param_distributions, model, n_iter, cv, seed, X_train, y_train):
+    # Get the model name from the model instance
+    model_name = model.__class__.__name__
+    
+    # Initialize RandomizedSearchCV
+    random_search = RandomizedSearchCV(
+        estimator           = model,
+        param_distributions = param_distributions,
+        n_iter              = n_iter,
+        cv                  = cv,
+        random_state        = seed,
+        n_jobs              = -1
+    )
+
+    # Fit the randomized search with tqdm progress bar
+    with tqdm_joblib(tqdm(desc="RandomizedSearchCV", total=n_iter * cv)):
+        random_search.fit(X_train, y_train)
+
+    # Retrieve the results
+    results = random_search.cv_results_
+
+    # Extract mean test scores
+    mean_test_scores = results['mean_test_score']
+    
+    # Create a string of parameter names with their lengths
+    param_lengths     = {k: len(v) for k, v in param_distributions.items()}
+    param_lengths_str = ", ".join([f"{k} ({v})" for k, v in param_lengths.items()])
+
+    # Extract results from the RandomizedSearchCV
+    results_df = pd.DataFrame(random_search.cv_results_)
+
+    # Sort results by mean_test_score in descending order
+    sorted_results = results_df.sort_values(by='mean_test_score', ascending=False)
+
+    # Retrieve the best parameters and model
+    best_params = random_search.best_params_
+
+    print("Best Parameters for the Model:")
+    print(best_params)
+    
+    mean_test_scores[mean_test_scores < 0] = 0
+    
+    # Plot the mean test scores to check for stability
+    plt.figure(figsize=(10, 6))
+    plt.plot(range(1, n_iter + 1), mean_test_scores, marker='o')
+    plt.xlabel('Iteration')
+    plt.ylabel('Mean Test Score')
+    plt.title(f'Cross-Validation Score Stability for {model_name}')
+    plt.suptitle(f'Parameters used: {param_lengths_str}', fontsize=10, y=0.95)
+    plt.grid(True)
+    plt.show()
+
+    return best_params, sorted_results
+
+### FUNCTION TO CALCULATE PARAMETER COMBINATIONS ###
+def calculate_n_iter(param_distributions):
+    n_iter = 1
+    for param in param_distributions.values():
+        n_iter *= len(param)
+    return n_iter
+
+### FUNCTION TO SET SEEDS AND ENVIRONMENT IN FCNN
+def set_seeds(seed_value):
+    ### Set parameters to try to be reproducible
+    # Set CPU-only execution
+    os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+
+    # Set additional TensorFlow configurations
+    os.environ['TF_DETERMINISTIC_OPS'] = '1'
+    os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
+
+    os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
+    # Enable single-threaded execution in NumPy
+    os.environ['OMP_NUM_THREADS'] = '1'
+    
+    # Set the PYTHONHASHSEED environment variable for Python's built-in hash randomization
+    os.environ['PYTHONHASHSEED'] = str(seed_value)
+
+    # Set seeds for Python's random module, NumPy, and TensorFlow
+    random.seed(seed_value)
+    np.random.seed(seed_value)
+    tf.random.set_seed(seed_value)
+
+#%% ###   0.5. ADJUST SEED AND ENVIRONMENT###
+# Config seed
+np.random.seed(config.seed)
+python_random.seed(config.seed)
+tf.random.set_seed(config.seed)
+random.seed(config.seed)
+os.environ['PYTHONHASHSEED'] = str(config.seed)
+
+# Suppress info messages
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  
+# Suppress FutureWarning messages
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+#%% ###   0.6. DATA LOADING, STANDARDIZATION AND SPLITTING ###
+### DATA LOADING ###
+df = pd.read_excel(config.path.data)
+
+### DATA STANDARDIZATION ###
+# Features to standardize (excluding 'edad' and 'sex')
+features_to_standardize = df.columns.drop(['edad', 'sex'])
+# Initialize the StandardScaler
+scaler = StandardScaler()
+# Fit the scaler to the features and transform
+df[features_to_standardize] = (scaler.fit_transform(df[features_to_standardize]))
+
+### DATA SPLITTING ###
+X     = df.drop(['edad', 'sex'], axis=1)
+y_age = df['edad']
+y_sex = df['sex'].astype('category').cat.codes  
+
+# Split the data for age and sex prediction tasks
+X_train_age, X_test_age, y_train_age, y_test_age = train_test_split(X, y_age, test_size=0.2, random_state=config.seed)
+X_train_sex, X_test_sex, y_train_sex, y_test_sex = train_test_split(X, y_sex, test_size=0.2, random_state=config.seed)
+
+#%% ###   0.7. DEMOGRAPHICS ###
+if config.demographics:
+    # Plot for age distribution
+    plt.figure(figsize=config.plot.size)
+    plt.subplot(1, 2, 1)
+    sns.histplot(df['edad'], bins=20, kde=True, color='plum')
+    plt.title('Distribution of Age')
+    plt.xlabel('Age')
+    plt.ylabel('Count')
+    
+    # Plot for sex distribution
+    plt.subplot(1, 2, 2)
+    sns.countplot(x='sex', data=df, palette=config.plot.barColors)
+    plt.title('Distribution of Sex')
+    plt.xlabel('Sex')
+    plt.ylabel('Count')
+    
+    plt.tight_layout()
+    plt.show()
+
+
+#%% ##### 1.   FIND BEST PARAMETERS #####
+#%% ###   1.1. FIND BEST PARAMETERS FOR LASSO ###
+if config.precalcHyperparams:
+    best_lasso_params = {'alpha': 0.045065065065065066}
+else:
+    param_distributions = {
+        'alpha': np.linspace(0.04, 0.06, 1000)
+    }
+    
+    lasso = Lasso(random_state=config.seed,max_iter=500000)
+    # best_lasso_params, sorted_lasso_results = perform_randomized_search_results_and_plot(param_distributions, 
+    #                                                                     lasso, 
+    #                                                                     n_iter  = calculate_n_iter(param_distributions), 
+    #                                                                     cv      = 5, 
+    #                                                                     seed    = config.seed, 
+    #                                                                     X_train = X_train_age, 
+    #                                                                     y_train = y_train_age)
+    
+    random_search = perform_randomized_search(param_distributions, 
+                                              lasso, 
+                                              n_iter  = calculate_n_iter(param_distributions), 
+                                              cv      = 5, 
+                                              seed    = config.seed, 
+                                              X_train = X_train_age, 
+                                              y_train = y_train_age)
+    best_lasso_params, sorted_lasso_results = extract_results_and_plot(random_search, param_distributions)
+    
+#%% ###   1.1b REDUCE VARIABLES USING LASSO ###
+
+lasso_model = Lasso(alpha=best_lasso_params['alpha'],
+               random_state=config.seed,
+               max_iter=50000)
+
+# Fit the Lasso model
+lasso_model.fit(X_train_age, y_train_age)
+    
+# Get the coefficients
+coef = lasso_model.coef_
+    
+# Identify non-zero coefficients (important features)
+important_features  = np.where(coef != 0)[0]
+    
+# Reduce the datasets to only include the important features
+X_train_age_reduced = X_train_age.iloc[:, important_features]
+X_test_age_reduced  = X_test_age.iloc[ :, important_features]
+
+#%% ###   1.2. FIND BEST PARAMETERS FOR RIDGE ###
+if config.perform_model.ridge_regression:
+    if config.precalcHyperparams:
+        best_ridge_params = {'alpha': 15.078078078078079}
+    else:
+        param_distributions = {
+            'alpha': np.linspace(13, 17, 1000)
+        }
+        ridge = Ridge(random_state=config.seed, max_iter=500000)
+        best_ridge_params, sorted_ridge_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                            ridge, 
+                                                                            n_iter  = calculate_n_iter(param_distributions), 
+                                                                            cv      = 5, 
+                                                                            seed    = config.seed, 
+                                                                            X_train = X_train_age, 
+                                                                            y_train = y_train_age)
+    
+    if config.precalcHyperparams:
+        best_ridge_reduced_params = {'alpha': 4.858858858858859}
+    else:
+        param_distributions = {
+            'alpha': np.linspace(2, 6, 1000)
+        }
+        best_ridge_reduced_params, sorted_ridge_reduced_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                                            ridge, 
+                                                                                            n_iter  = calculate_n_iter(param_distributions), 
+                                                                                            cv      = 5, 
+                                                                                            seed    = config.seed, 
+                                                                                            X_train = X_train_age_reduced, 
+                                                                                            y_train = y_train_age)
+        
+#%% ###   1.3. FIND BEST PARAMETERS FOR ELASTICNET ###
+if config.perform_model.elasticnet_regression:
+    if config.precalcHyperparams:
+        best_elasticnet_params = {'l1_ratio': 0.35, 'alpha': 0.033}
+    else:
+        param_distributions = {
+            'alpha': np.linspace(0.028, 0.034, 7),
+            'l1_ratio': np.linspace(0.2, 0.4, 5)
+        }
+        elasticnet = ElasticNet(random_state=config.seed, max_iter=500000)
+        best_elasticnet_params, sorted_elasticnet_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                                      elasticnet, 
+                                                                                      n_iter=calculate_n_iter(param_distributions), 
+                                                                                      cv=5, 
+                                                                                      seed=config.seed, 
+                                                                                      X_train=X_train_age, 
+                                                                                      y_train=y_train_age)
+    
+    if config.precalcHyperparams:
+        best_elasticnet_reduced_params = {'alpha': 0.0096, 'l1_ratio': 0}
+    else:
+        param_distributions = {
+            'alpha': np.linspace(0.009, 0.010, 21),
+            'l1_ratio': np.linspace(0,0.5,11)
+        }
+        elasticnet = ElasticNet(random_state=config.seed, max_iter=5000000)
+        best_elasticnet_reduced_params, sorted_elasticnet_reduced_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                                                      elasticnet, 
+                                                                                                      n_iter=calculate_n_iter(param_distributions), 
+                                                                                                      cv=5, 
+                                                                                                      seed=config.seed, 
+                                                                                                      X_train=X_train_age_reduced, 
+                                                                                                      y_train=y_train_age)
+    
+#%% ###   1.4. FIND BEST PARAMETERS FOR KERNELRIDGE ###
+if config.perform_model.kernelridge_regression:
+    if config.precalcHyperparams:
+        best_kernelridge_params = {'kernel': 'rbf', 'gamma': 0.00016595869074375615, 'degree':3, 'coef0': 0.001, 'alpha': 0.005754399373371578}
+    else:
+        param_distributions = {
+            'alpha': np.logspace(-3, 2, 50),
+            'kernel': ['poly', 'rbf', 'sigmoid']
+        }
+        param_distributions = {
+            'kernel': ['sigmoid'],
+            'alpha': np.logspace(-6, -4, 101),
+            'gamma': np.logspace(-7, 1),  # Kernel coefficient
+            'coef0': np.logspace(-3, 1)    # Independent term in kernel function
+        }
+        
+        param_distributions = {
+            'kernel': ['rbf'],
+            'alpha': np.logspace(-7, 0, 101),
+            'gamma': np.logspace(-7, 7, 101),  # Kernel coefficient
+            'coef0': np.logspace(-3,-3, 1)    # Doesn't matter for rbf
+            }
+        
+        param_distributions = {
+            'kernel': ['poly'],
+            'degree': np.linspace(1, 3, 3, dtype='int'),  # Kernel coefficient
+            'gamma': np.logspace(-10, -5, 21),  # Kernel coefficient
+            'alpha': np.logspace(-10, -5, 21),
+            'coef0': np.logspace(-10,-5, 6),    # Doesn't matter for rbf
+            }
+        
+        
+        kernelridge = KernelRidge()
+        best_kernelridge_params, sorted_kernelridge_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                                        kernelridge, 
+                                                                                        n_iter=calculate_n_iter(param_distributions), 
+                                                                                        cv=5, 
+                                                                                        seed=config.seed, 
+                                                                                        X_train=X_train_age, 
+                                                                                        y_train=y_train_age)
+    
+    if config.precalcHyperparams:
+        best_kernelridge_reduced_params = {'kernel': 'rbf', 'gamma': 0.00043651583224016654, 'degree':3,'coef0': 0.001, 'alpha': 0.005754399373371578}
+    else:
+        param_distributions = {
+            'kernel': ['linear', 'poly', 'rbf', 'sigmoid'],
+            'alpha': np.logspace(-3, 2, 10)
+        }
+        
+        param_distributions = {
+            'kernel': ['sigmoid'],
+            'alpha': np.logspace(-6, -4, 101),
+            'gamma': np.logspace(-8, -6, 11),  # Kernel coefficient
+            'coef0': np.logspace(-4, -2, 11)    # Independent term in kernel function
+            }
+        
+        param_distributions = {
+            'kernel': ['rbf'],
+            'alpha': np.logspace(-7, 0, 101),
+            'gamma': np.logspace(-7, 7, 101),  # Kernel coefficient
+            'coef0': np.logspace(-3,-3, 1)    # Doesn't matter for rbf
+            }
+        param_distributions = {
+            'kernel': ['poly'],
+            'degree': np.linspace(1, 3, 3, dtype='int'),  # Kernel coefficient
+            'gamma': np.logspace(-10, -5, 21),  # Kernel coefficient
+            'alpha': np.logspace(-10, -5, 21),
+            'coef0': np.logspace(-10,-5, 6),    # Doesn't matter for rbf
+            }
+        best_kernelridge_reduced_params, sorted_kernelridge_reduced_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                                                        kernelridge, 
+                                                                                                        n_iter=calculate_n_iter(param_distributions), 
+                                                                                                        cv=5, 
+                                                                                                        seed=config.seed, 
+                                                                                                        X_train=X_train_age_reduced, 
+                                                                                                        y_train=y_train_age)
+#%% ###   1.5. FIND BEST PARAMETERS FOR SVR ###
+if config.perform_model.svr:
+    if config.precalcHyperparams:
+        best_svr_params = {'kernel': 'linear', 'epsilon': 1.73, 'gamma':'scale','degree': 1, 'C': 0.71}
+        #best_svr_params = {'kernel': 'rbf', 'gamma': 'auto', 'epsilon': 4.4668359215096345, 'degree': 1, 'C': 100.0} # Funciona peor que el linear en el test
+    else:
+        param_distributions = {
+            'kernel': ['linear'],
+            'degree': [1], # No effect in linear
+            'gamma': ['scale'], # No effect in linear
+            'C': np.linspace(0.5, 1, 51),
+            'epsilon': np.linspace(1.5, 2, 51),  
+        }
+        param_distributions = {
+            'kernel': ['rbf'],
+            'degree': [1], # No effect in linear
+            'gamma': ['scale', 'auto'], # No effect in linear
+            'C': np.logspace(-5, 5, 201),
+            'epsilon': np.logspace(-5, 5, 201),  
+        }
+        svr = SVR()
+        best_svr_params, sorted_svr_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                        svr, 
+                                                                        n_iter=calculate_n_iter(param_distributions), 
+                                                                        cv=5, 
+                                                                        seed=config.seed, 
+                                                                        X_train=X_train_age, 
+                                                                        y_train=y_train_age)
+    
+    if config.precalcHyperparams:
+        best_svr_reduced_params = {'kernel': 'linear', 'epsilon': 2.3440000000000003, 'gamma':'scale', 'degree': 1, 'C': 2.452}
+        #best_svr_reduced_params = {'kernel': 'rbf', 'gamma': 'auto', 'epsilon': 2.818382931264455, 'degree': 1, 'C': 100.0} # Funciona peor que el linear en el test
+    else:
+        param_distributions = {
+            'kernel': ['linear'],
+            'degree': [1], # No effect in linear
+            'C': np.linspace(2.2, 2.8, 51),
+            'epsilon': np.linspace(2.2, 2.8, 51),  
+        }
+        param_distributions = {
+            'kernel': ['rbf'],
+            'degree': [1], # No effect in linear
+            'gamma': ['scale', 'auto'], # No effect in linear
+            'C': np.logspace(-5, 5, 201),
+            'epsilon': np.logspace(-5, 5, 201),  
+        }
+        best_svr_reduced_params, sorted_svr_reduced_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                                        svr, 
+                                                                                        n_iter=calculate_n_iter(param_distributions), 
+                                                                                        cv=5, 
+                                                                                        seed=config.seed, 
+                                                                                        X_train=X_train_age_reduced, 
+                                                                                        y_train=y_train_age)
+
+
+
+#%% ###   1.6. FIND BEST PARAMETERS FOR GRADIENT BOOSTING REGRESSOR ###
+if config.perform_model.gradient_boosting_regression:
+    if config.precalcHyperparams:
+        best_gbr_params = {'n_estimators': 900, 'max_depth': 2, 'learning_rate': 0.03}
+    else:
+        param_distributions = {
+            'n_estimators': np.linspace(100, 1000, 10, dtype='int'),
+            'learning_rate': np.linspace(0.01, 0.15, 15),
+            'max_depth': np.linspace(2, 2, 1, dtype='int')
+        }
+        gbr = GradientBoostingRegressor(random_state=config.seed)
+        best_gbr_params, sorted_gbr_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                        gbr, 
+                                                                        n_iter  = calculate_n_iter(param_distributions), 
+                                                                        cv      = 5, 
+                                                                        seed    = config.seed, 
+                                                                        X_train = X_train_age, 
+                                                                        y_train = y_train_age)
+    
+    if config.precalcHyperparams:
+        best_gbr_reduced_params = {'n_estimators': 400, 'max_depth': 2, 'learning_rate': 0.1}
+    else:
+        best_gbr_reduced_params, sorted_gbr_reduced_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                                        gbr, 
+                                                                                        n_iter  = calculate_n_iter(param_distributions), 
+                                                                                        cv      = 5, 
+                                                                                        seed    = config.seed, 
+                                                                                        X_train = X_train_age_reduced, 
+                                                                                        y_train = y_train_age)
+#%% ###   1.7. FIND BEST PARAMETERS FOR MLP ###
+if config.perform_model.mlp_regression:
+    if config.precalcHyperparams:
+        best_mlp_params = {'solver': 'adam', 'learning_rate_init': 0.001, 'learning_rate': 'constant', 'hidden_layer_sizes': (100, 100), 'alpha': 0.001, 'activation': 'logistic'}
+    else:
+        param_distributions = {
+            'hidden_layer_sizes': [(50, 50), (100, 50), (100, 100), (150, 100)],
+            'activation': ['logistic'],
+            'solver': ['adam', 'sgd'],
+            'alpha': np.logspace(-4, -2, 3),
+            'learning_rate': ['constant', 'adaptive'],
+            'learning_rate_init': np.logspace(-3, -2, 2)
+        }
+        mlp = MLPRegressor(random_state=config.seed, max_iter=5000)
+        best_mlp_params, sorted_mlp_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                        mlp, 
+                                                                        n_iter  = calculate_n_iter(param_distributions), 
+                                                                        cv      = 5, 
+                                                                        seed    = config.seed, 
+                                                                        X_train = X_train_age, 
+                                                                        y_train = y_train_age)
+    
+    if config.precalcHyperparams:
+        best_mlp_reduced_params = {'solver': 'sgd', 'learning_rate_init': 0.01, 'learning_rate': 'constant', 'hidden_layer_sizes': (150, 100), 'alpha': 0.01, 'activation': 'logistic'}
+    else:
+        best_mlp_reduced_params, sorted_mlp_reduced_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                                        mlp, 
+                                                                                        n_iter  = calculate_n_iter(param_distributions), 
+                                                                                        cv      = 5, 
+                                                                                        seed    = config.seed, 
+                                                                                        X_train = X_train_age_reduced, 
+                                                                                        y_train = y_train_age)
+#%% ###   1.8. FIND BEST PARAMETERS FOR RANDOM FOREST REGRESSOR ###
+if config.perform_model.random_forest_regression:
+    if config.precalcHyperparams:
+        best_rf_params = {'n_estimators': 200, 'min_samples_split': 3, 'min_samples_leaf': 1, 'max_features': 'sqrt', 'max_depth': 20, 'bootstrap': False}
+    else:
+        param_distributions = {
+            'n_estimators': [50, 100, 150, 200, 250, 300, 350, 400, 450, 500],
+            'max_features': ['sqrt', 'log2'],
+            'max_depth': [None, 10, 20, 30, 40, 50],
+            'min_samples_split': [2, 3, 4, 5, 6, 7, 8, 9, 10],
+            'min_samples_leaf': [1, 2, 3, 4],
+            'bootstrap': [False]
+        }
+        rf = RandomForestRegressor(random_state=config.seed)
+        best_rf_params, sorted_rf_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                      rf, 
+                                                                      n_iter  = calculate_n_iter(param_distributions), 
+                                                                      cv      = 5, 
+                                                                      seed    = config.seed, 
+                                                                      X_train = X_train_age, 
+                                                                      y_train = y_train_age)
+    
+    if config.precalcHyperparams:
+        best_rf_reduced_params = {'n_estimators': 150, 'min_samples_split': 2, 'min_samples_leaf': 1, 'max_features': 'sqrt', 'max_depth': 10, 'bootstrap': False}
+    else:
+        best_rf_reduced_params, sorted_rf_reduced_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                                      rf, 
+                                                                                      n_iter  = calculate_n_iter(param_distributions), 
+                                                                                      cv      = 5, 
+                                                                                      seed    = config.seed, 
+                                                                                      X_train = X_train_age_reduced, 
+                                                                                      y_train = y_train_age)
+#%% ###   1.9. FIND BEST PARAMETERS FOR KNEIGHBORSREGRESSOR ###
+if config.perform_model.kneighbors_regression:
+    if config.precalcHyperparams:
+        best_knr_params = {'weights': 'distance', 'p': 1, 'n_neighbors': 11, 'leaf_size': 5, 'algorithm': 'auto'}
+    else:
+        param_distributions = {
+            'n_neighbors': np.linspace(3, 50, 47, dtype='int'),
+            'weights': ['distance'],
+            'algorithm': ['auto'],
+            'p': [1]  # for Minkowski distance metric, 1=Manhattan, 2=Euclidean
+        }
+        knr = KNeighborsRegressor()
+        best_knr_params, sorted_knr_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                        knr, 
+                                                                        n_iter=calculate_n_iter(param_distributions), 
+                                                                        cv=5, 
+                                                                        seed=config.seed, 
+                                                                        X_train=X_train_age, 
+                                                                        y_train=y_train_age)
+    
+    if config.precalcHyperparams:
+        best_knr_reduced_params = {'weights': 'distance', 'p': 1, 'n_neighbors': 11, 'leaf_size': 5, 'algorithm': 'auto'}
+    else:
+        best_knr_reduced_params, sorted_knr_reduced_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                        knr, 
+                                                                        n_iter=calculate_n_iter(param_distributions), 
+                                                                        cv=5, 
+                                                                        seed=config.seed, 
+                                                                        X_train=X_train_age_reduced, 
+                                                                        y_train=y_train_age)
+
+
+
+#%% ###   1.10 FIND BEST PARAMETERS FOR DECISIONTREEREGRESSOR ###
+if config.perform_model.decision_tree_regression:
+    if config.precalcHyperparams:
+        best_dtr_params = {'splitter': 'random', 'min_samples_split': 4, 'min_samples_leaf': 11, 'max_features': None, 'max_depth': 41, 'criterion': 'squared_error'}
+    # {'splitter': 'random', 'min_samples_split': 6, 'min_samples_leaf': 11, 'max_features': None, 'max_depth': 12, 'criterion': 'squared_error'}
+    else:
+        param_distributions = {
+            'criterion': ['squared_error'],
+            'splitter': ['random'],
+            'max_depth': [None] + list(np.linspace(3, 50, 48, dtype='int')),
+            'min_samples_split': np.linspace(2, 20, 19, dtype='int'),
+            'min_samples_leaf': np.linspace(1, 20, 20, dtype='int'),
+            'max_features': [None]
+        }
+        
+        dtr = DecisionTreeRegressor()
+        best_dtr_params, sorted_dtr_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                        dtr, 
+                                                                        n_iter=calculate_n_iter(param_distributions), 
+                                                                        cv=5, 
+                                                                        seed=config.seed, 
+                                                                        X_train=X_train_age, 
+                                                                        y_train=y_train_age)
+    
+    if config.precalcHyperparams:
+        best_dtr_reduced_params = {'splitter': 'random', 'min_samples_split': 14, 'min_samples_leaf': 14, 'max_features': None, 'max_depth': 12, 'criterion': 'squared_error'}
+    #{'splitter': 'random', 'min_samples_split': 18, 'min_samples_leaf': 13, 'max_features': None, 'max_depth': None, 'criterion': 'squared_error'}
+    else:
+        best_dtr_reduced_params, sorted_dtr_reduced_results = perform_randomized_search_results_and_plot(param_distributions, 
+                                                                        dtr, 
+                                                                        n_iter=calculate_n_iter(param_distributions), 
+                                                                        cv=5, 
+                                                                        seed=config.seed, 
+                                                                        X_train=X_train_age_reduced, 
+                                                                        y_train=y_train_age)
+        
+    # Este con random cada vez sale una cosa disinta, incluso con la seed marcada. habría que revisarlo.
+    
+#%% ##### 2.   REGRESSOR MODELS #####
+# Define Regression Models
+regressors = {}
+if config.perform_model.linear_regression:
+    regressors['LinearRegressor'] = LinearRegression()
+if config.perform_model.nnls_linear_regression:
+    regressors['NNLSLinearRegressor'] = LinearRegression(positive=True)
+if config.perform_model.lasso_regression:
+    regressors['Lasso'] = Lasso(alpha=best_lasso_params['alpha'], 
+                                random_state=config.seed, 
+                                max_iter=50000)    
+if config.perform_model.ridge_regression:
+    regressors['Ridge'] = Ridge(alpha=best_ridge_params['alpha'],
+                                random_state=config.seed,
+                                max_iter=50000)
+    regressors['RidgeReduced'] = Ridge(alpha=best_ridge_reduced_params['alpha'],
+                                       random_state=config.seed,
+                                       max_iter=50000)
+if config.perform_model.elasticnet_regression:
+    regressors['ElasticNet'] = ElasticNet(alpha=best_elasticnet_params['alpha'],
+                                          l1_ratio=best_elasticnet_params['l1_ratio'],
+                                          random_state=config.seed,
+                                          max_iter=500000)
+    regressors['ElasticNetReduced'] = ElasticNet(alpha=best_elasticnet_reduced_params['alpha'],
+                                                 l1_ratio=best_elasticnet_reduced_params['l1_ratio'],
+                                                 random_state=config.seed,
+                                                 max_iter=500000)
+if config.perform_model.kernelridge_regression:
+    regressors['KernelRidge'] = KernelRidge(alpha=best_kernelridge_params['alpha'],
+                                            coef0=best_kernelridge_params['coef0'],
+                                            gamma=best_kernelridge_params['gamma'],
+                                            degree=best_kernelridge_params['degree'],
+                                            kernel=best_kernelridge_params['kernel'])
+    regressors['KernelRidgeReduced'] = KernelRidge(alpha=best_kernelridge_reduced_params['alpha'],
+                                                   coef0=best_kernelridge_reduced_params['coef0'],
+                                                   gamma=best_kernelridge_reduced_params['gamma'],
+                                                   degree=best_kernelridge_reduced_params['degree'],
+                                                   kernel=best_kernelridge_reduced_params['kernel'])
+if config.perform_model.svr:
+    regressors['SVR'] = SVR(C=best_svr_params['C'],
+                            epsilon=best_svr_params['epsilon'],
+                            kernel=best_svr_params['kernel'],
+                            degree=best_svr_params.get('degree', 3))
+    regressors['SVRReduced'] = SVR(C=best_svr_reduced_params['C'],
+                                   epsilon=best_svr_reduced_params['epsilon'],
+                                   kernel=best_svr_reduced_params['kernel'],
+                                   degree=best_svr_reduced_params.get('degree', 3))
+
+if config.perform_model.gradient_boosting_regression:
+    regressors['GradientBoostingRegressor'] = GradientBoostingRegressor(n_estimators=best_gbr_params['n_estimators'],
+                                                                        max_depth=best_gbr_params['max_depth'],
+                                                                        learning_rate=best_gbr_params['learning_rate'],
+                                                                        random_state=config.seed)
+    regressors['GradientBoostingRegressorReduced'] = GradientBoostingRegressor(n_estimators=best_gbr_reduced_params['n_estimators'],
+                                                                               max_depth=best_gbr_reduced_params['max_depth'],
+                                                                               learning_rate=best_gbr_reduced_params['learning_rate'],
+                                                                               random_state=config.seed)
+
+if config.perform_model.mlp_regression:
+    regressors['MLPRegressor'] = MLPRegressor(random_state=config.seed,
+                                              max_iter=50000,
+                                              hidden_layer_sizes=best_mlp_params['hidden_layer_sizes'],
+                                              activation=best_mlp_params['activation'],
+                                              solver=best_mlp_params['solver'],
+                                              alpha=best_mlp_params['alpha'],
+                                              learning_rate=best_mlp_params['learning_rate'],
+                                              learning_rate_init=best_mlp_params['learning_rate_init'])
+    regressors['MLPRegressorReduced'] = MLPRegressor(random_state=config.seed,
+                                                     max_iter=50000,
+                                                     hidden_layer_sizes=best_mlp_reduced_params['hidden_layer_sizes'],
+                                                     activation=best_mlp_reduced_params['activation'],
+                                                     solver=best_mlp_reduced_params['solver'],
+                                                     alpha=best_mlp_reduced_params['alpha'],
+                                                     learning_rate=best_mlp_reduced_params['learning_rate'],
+                                                     learning_rate_init=best_mlp_reduced_params['learning_rate_init'])
+
+if config.perform_model.random_forest_regression:
+    regressors['RandomForestRegressor'] = RandomForestRegressor(random_state=config.seed,
+                                                                n_estimators=best_rf_params['n_estimators'],
+                                                                max_depth=best_rf_params['max_depth'],
+                                                                min_samples_split=best_rf_params['min_samples_split'],
+                                                                min_samples_leaf=best_rf_params['min_samples_leaf'],
+                                                                max_features=best_rf_params['max_features'],
+                                                                bootstrap=best_rf_params['bootstrap'])
+    regressors['RandomForestRegressorReduced'] = RandomForestRegressor(random_state=config.seed,
+                                                                       n_estimators=best_rf_reduced_params['n_estimators'],
+                                                                       max_depth=best_rf_reduced_params['max_depth'],
+                                                                       min_samples_split=best_rf_reduced_params['min_samples_split'],
+                                                                       min_samples_leaf=best_rf_reduced_params['min_samples_leaf'],
+                                                                       max_features=best_rf_reduced_params['max_features'],
+                                                                       bootstrap=best_rf_reduced_params['bootstrap'])
+
+if config.perform_model.kneighbors_regression:
+    regressors['KNeighborsRegressor'] = KNeighborsRegressor(weights=best_knr_params['weights'],
+                                                            p=best_knr_params['p'],
+                                                            n_neighbors=best_knr_params['n_neighbors'],
+                                                            algorithm=best_knr_params['algorithm'])
+    regressors['KNeighborsRegressorReduced'] = KNeighborsRegressor(weights=best_knr_reduced_params['weights'],
+                                                                   p=best_knr_reduced_params['p'],
+                                                                   n_neighbors=best_knr_reduced_params['n_neighbors'],
+                                                                   algorithm=best_knr_reduced_params['algorithm'])
+
+if config.perform_model.decision_tree_regression:
+    regressors['DecisionTreeRegressor'] = DecisionTreeRegressor(random_state=config.seed,
+                                                                splitter=best_dtr_params['splitter'],
+                                                                min_samples_split=best_dtr_params['min_samples_split'],
+                                                                min_samples_leaf=best_dtr_params['min_samples_leaf'],
+                                                                max_features=best_dtr_params['max_features'],
+                                                                max_depth=best_dtr_params['max_depth'],
+                                                                criterion=best_dtr_params['criterion'])
+    regressors['DecisionTreeRegressorReduced'] = DecisionTreeRegressor(random_state=config.seed,
+                                                                       splitter=best_dtr_reduced_params['splitter'],
+                                                                       min_samples_split=best_dtr_reduced_params['min_samples_split'],
+                                                                       min_samples_leaf=best_dtr_reduced_params['min_samples_leaf'],
+                                                                       max_features=best_dtr_reduced_params['max_features'],
+                                                                       max_depth=best_dtr_reduced_params['max_depth'],
+                                                                       criterion=best_dtr_reduced_params['criterion'])
+#%% ###   2.1a LINEAR REGRESSION FOR AGE PREDICTION #####
+if config.perform_model.linear_regression:
+    plot_predictions_and_residuals(regressors['LinearRegressor'], X_train_age, y_train_age, X_test_age, y_test_age, 'Linear Regression', config)
+
+#%% ###   2.1b LINEAR REGRESSION FOR AGE PREDICTION - REDUCED VARIABLES #####
+if config.perform_model.linear_regression:
+    plot_predictions_and_residuals(regressors['LinearRegressor'], X_train_age_reduced, y_train_age, X_test_age_reduced, y_test_age, 'Linear Regression Reduced', config)
+
+#%% ###   2.2a NON-NEGATIVE LEAST SQUARES LINEAR REGRESSION FOR AGE PREDICTION #####
+if config.perform_model.nnls_linear_regression:
+    plot_predictions_and_residuals(regressors['NNLSLinearRegressor'], X_train_age, y_train_age, X_test_age, y_test_age, 'Non-Negative Least Squares Linear Regression', config)
+
+#%% ###   2.2b NON-NEGATIVE LEAST SQUARES LINEAR REGRESSION FOR AGE PREDICTION - REDUCED VARIABLES #####
+if config.perform_model.nnls_linear_regression:
+    plot_predictions_and_residuals(regressors['NNLSLinearRegressor'], X_train_age_reduced, y_train_age, X_test_age_reduced, y_test_age, 'Non-Negative Least Squares Linear Regression Reduced', config)
+
+#%% ###   2.3a LASSO REGRESSION FOR AGE PREDICTION #####
+if config.perform_model.lasso_regression:
+    plot_predictions_and_residuals(regressors['Lasso'], X_train_age, y_train_age, X_test_age, y_test_age, 'Lasso Regression', config)
+
+#%% ###   2.3b LASSO REGRESSION FOR AGE PREDICTION - REDUCED VARIABLES #####
+if config.perform_model.lasso_regression:
+    plot_predictions_and_residuals(regressors['Lasso'], X_train_age_reduced, y_train_age, X_test_age_reduced, y_test_age, 'Lasso Regression Reduced', config)
+
+#%% ###   2.4a RIDGE REGRESSION FOR AGE PREDICTION #####
+if config.perform_model.ridge_regression:
+    plot_predictions_and_residuals(regressors['Ridge'], X_train_age, y_train_age, X_test_age, y_test_age, 'Ridge Regression', config)
+
+#%% ###   2.4b RIDGE REGRESSION FOR AGE PREDICTION - REDUCED VARIABLES #####
+if config.perform_model.ridge_regression:
+    plot_predictions_and_residuals(regressors['RidgeReduced'], X_train_age_reduced, y_train_age, X_test_age_reduced, y_test_age, 'Ridge Regression Reduced', config)
+
+#%% ###   2.5a ELASTICNET REGRESSION FOR AGE PREDICTION #####
+if config.perform_model.elasticnet_regression:
+    plot_predictions_and_residuals(regressors['ElasticNet'], X_train_age, y_train_age, X_test_age, y_test_age, 'ElasticNet Regression', config)
+
+#%% ###   2.5b ELASTICNET REGRESSION FOR AGE PREDICTION - REDUCED VARIABLES #####
+if config.perform_model.elasticnet_regression:
+    plot_predictions_and_residuals(regressors['ElasticNetReduced'], X_train_age_reduced, y_train_age, X_test_age_reduced, y_test_age, 'ElasticNet Regression Reduced', config)
+
+#%% ###   2.6a KERNELRIDGE REGRESSION FOR AGE PREDICTION #####
+if config.perform_model.kernelridge_regression:
+    plot_predictions_and_residuals(regressors['KernelRidge'], X_train_age, y_train_age, X_test_age, y_test_age, 'KernelRidge Regression', config)
+
+#%% ###   2.6b KERNELRIDGE REGRESSION FOR AGE PREDICTION - REDUCED VARIABLES #####
+if config.perform_model.kernelridge_regression:
+    plot_predictions_and_residuals(regressors['KernelRidgeReduced'], X_train_age_reduced, y_train_age, X_test_age_reduced, y_test_age, 'KernelRidge Regression Reduced', config)
+
+#%% ###   2.7a SUPPORT VECTOR REGRESSION FOR AGE PREDICTION #####
+if config.perform_model.svr:
+    plot_predictions_and_residuals(regressors['SVR'], X_train_age, y_train_age, X_test_age, y_test_age, 'Support Vector Regression', config)
+
+#%% ###   2.7b SUPPORT VECTOR REGRESSION FOR AGE PREDICTION - REDUCED VARIABLES #####
+if config.perform_model.svr:
+    plot_predictions_and_residuals(regressors['SVRReduced'], X_train_age_reduced, y_train_age, X_test_age_reduced, y_test_age, 'Support Vector Regression Reduced', config)
+
+#%% ###   2.8a GRADIENT BOOSTING REGRESSION FOR AGE PREDICTION #####
+if config.perform_model.gradient_boosting_regression:
+    plot_predictions_and_residuals(regressors['GradientBoostingRegressor'], X_train_age, y_train_age, X_test_age, y_test_age, 'Gradient Boosting Regression', config)
+
+#%% ###   2.9b GRADIENT BOOSTING REGRESSION FOR AGE PREDICTION - REDUCED VARIABLES #####
+if config.perform_model.gradient_boosting_regression:
+    plot_predictions_and_residuals(regressors['GradientBoostingRegressorReduced'], X_train_age_reduced, y_train_age, X_test_age_reduced, y_test_age, 'Gradient Boosting Regression Reduced', config)
+
+#%% ###   2.10a MLP REGRESSION FOR AGE PREDICTION #####
+if config.perform_model.mlp_regression:
+    plot_predictions_and_residuals(regressors['MLPRegressor'], X_train_age, y_train_age, X_test_age, y_test_age, 'MLP Regression', config)
+
+#%% ###   2.10b MLP REGRESSION FOR AGE PREDICTION - REDUCED VARIABLES #####
+if config.perform_model.mlp_regression:
+    plot_predictions_and_residuals(regressors['MLPRegressorReduced'], X_train_age_reduced, y_train_age, X_test_age_reduced, y_test_age, 'MLP Regression Reduced', config)
+
+#%% ###   2.11a RANDOM FOREST REGRESSION FOR AGE PREDICTION #####
+if config.perform_model.random_forest_regression:
+    plot_predictions_and_residuals(regressors['RandomForestRegressor'], X_train_age, y_train_age, X_test_age, y_test_age, 'Random Forest Regression', config)
+
+#%% ###   2.11b RANDOM FOREST REGRESSION FOR AGE PREDICTION - REDUCED VARIABLES #####
+if config.perform_model.random_forest_regression:
+    plot_predictions_and_residuals(regressors['RandomForestRegressor'], X_train_age_reduced, y_train_age, X_test_age_reduced, y_test_age, 'Random Forest Regression Reduced', config)
+
+#%% ###   2.12a K NEIGHBORS REGRESSION FOR AGE PREDICTION #####
+if config.perform_model.kneighbors_regression:
+    plot_predictions_and_residuals(regressors['KNeighborsRegressor'], X_train_age, y_train_age, X_test_age, y_test_age, 'K Neighbors Regression', config)
+
+#%% ###   2.12b K NEIGHBORS REGRESSION FOR AGE PREDICTION - REDUCED VARIABLES #####
+if config.perform_model.kneighbors_regression:
+    plot_predictions_and_residuals(regressors['KNeighborsRegressorReduced'], X_train_age_reduced, y_train_age, X_test_age_reduced, y_test_age, 'K Neighbors Regression Reduced', config)
+
+#%% ###   2.13a DECISION TREE REGRESSION FOR AGE PREDICTION #####
+if config.perform_model.decision_tree_regression:
+    plot_predictions_and_residuals(regressors['DecisionTreeRegressor'], X_train_age, y_train_age, X_test_age, y_test_age, 'Decision Tree Regression', config)
+
+#%% ###   2.13b DECISION TREE REGRESSION FOR AGE PREDICTION - REDUCED VARIABLES #####
+if config.perform_model.decision_tree_regression:
+    plot_predictions_and_residuals(regressors['DecisionTreeRegressorReduced'], X_train_age_reduced, y_train_age, X_test_age_reduced, y_test_age, 'Decision Tree Regression Reduced', config)
+#%% ##### 3.    FCNN NOT REDUCED
+#%% ###   3.b   TRANSFORM VARIABLES INTO CORRECT SHAPES FOR FCNN ###
+# Convert dataframes to numpy arrays
+X_train = X_train_age.values
+Y_train = y_train_age.values
+X_test  = X_test_age.values
+Y_test  = y_test_age.values
+
+# Ensure target arrays are one-dimensional
+if Y_train.ndim != 1 or Y_test.ndim != 1:
+    raise ValueError("Target arrays (Y_train and Y_test) must be one-dimensional")
+
+#%% ###   3.1.  TWO LAYERS FCNN NOT REDUCED #####
+#%% ###   3.1.1.     2FCNNnr DEFINE MODEL AND HYPERPARAMETERS
+if config.perform_model.fcnn_two_layers:   
+    def build_model(units1, units2, dropout1, dropout2, l2_reg1, l2_reg2, learning_rate, decay_steps, decay_rate):
+        tf.random.set_seed(config.seed)
+        model = Sequential()
+        model.add(Input(shape=(X_train.shape[1],)))
+        model.add(Dense(units=units1, activation='relu', kernel_regularizer=l2(l2_reg1)))
+        model.add(Dropout(rate=dropout1))
+        model.add(Dense(units=units2, activation='relu', kernel_regularizer=l2(l2_reg2)))
+        model.add(Dropout(rate=dropout2))
+        model.add(Dense(1, activation='linear'))
+        
+            # Create the ExponentialDecay learning rate scheduler
+        lr_schedule = ExponentialDecay(
+            learning_rate,
+            decay_steps=decay_steps,
+            decay_rate=decay_rate,
+            staircase=True
+        )
+        
+        # Pass the learning rate scheduler to the optimizer
+        optimizer = Adam(learning_rate=lr_schedule)
+        
+        model.compile(
+            optimizer = optimizer,
+            loss      = 'mean_squared_error',
+            metrics   = ['mean_absolute_error']
+        )
+        return model
+    
+    # Wrap the model
+    early_stopping = EarlyStopping(monitor='loss', patience=150, restore_best_weights=True)
+    keras_regressor = KerasRegressor(model=build_model, verbose=0, callbacks=[early_stopping], random_state=config.seed)
+    
+    # Define hyperparameters
+    param_distributions = {
+        'model__units1': [128],
+        'model__units2': [600],
+        'model__dropout1': [0.65],
+        'model__dropout2': [0.20],
+        'model__l2_reg1': [0.35],  # L2 regularization strengths
+        'model__l2_reg2': [0.5],  # L2 regularization strengths
+        'model__learning_rate': [0.0005],
+        'model__decay_steps': [1000],
+        'model__decay_rate': [0.95],
+        'batch_size': [64],  # Different batch sizes to test
+        'epochs': [5000]  # Max epochs
+    }
+
+#%% ###   3.1.2.     2FCNNnr PERFORM HYPERPARAMETER TUNING WITH CROSS-VALIDATION
+if config.perform_model.fcnn_two_layers:
+    
+    # Set seeds
+    set_seeds(config.seed)
+    
+    random_search_2FCNN_notReduced = perform_randomized_search(param_distributions, 
+                                              keras_regressor, 
+                                              n_iter=calculate_n_iter(param_distributions), 
+                                              cv=5, 
+                                              seed=config.seed, 
+                                              X_train=X_train, 
+                                              y_train=Y_train) 
+   
+    
+    best_2FCNN_params_notReduced, sorted_2FCNN_results_notReduced = extract_results_and_plot(random_search_2FCNN_notReduced, param_distributions)
+    
+    # best_2FCNN_params = {'model__units2': 512, 'model__units1': 128, 'model__learning_rate': 0.001, 'model__l2_reg2': 0.5, 'model__l2_reg1': 0.35, 'model__dropout2': 0.2, 'model__dropout1': 0.7, 'model__decay_steps': 1000, 'model__decay_rate': 0.95, 'epochs': 5000, 'batch_size': 64}
+    # mean_test_score   = 0.839279
+	
+    # Test Mean Squared Error (MSE): 67.620911536494
+    # Test Root Mean Squared Error (RMSE): 8.223193512042265
+    # Test Mean Absolute Error (MAE): 6.234781253262886
+    # Test R-squared (R²): 0.8599261757468418
+
+#%% ###   3.1.3.     2FCNNnr EVALUATE THE BEST MODEL ON TEST DATA
+if config.perform_model.fcnn_two_layers:
+    best_hps = random_search_2FCNN_notReduced.best_params_
+    print("Best Hyperparameters:", best_hps)
+    
+    best_model = random_search_2FCNN_notReduced.best_estimator_.model_
+    
+    # Make predictions
+    y_pred = best_model.predict(X_test).flatten()
+    
+    # Ensure predictions are one-dimensional
+    if y_pred.ndim != 1:
+        raise ValueError("Predicted values (y_pred) must be one-dimensional")
+    
+    # Performance metrics
+    mse = mean_squared_error(Y_test, y_pred)
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(Y_test, y_pred)
+    r2 = r2_score(Y_test, y_pred)
+    
+    print(f'Test Mean Squared Error (MSE): {mse}')
+    print(f'Test Root Mean Squared Error (RMSE): {rmse}')
+    print(f'Test Mean Absolute Error (MAE): {mae}')
+    print(f'Test R-squared (R²): {r2}')
+    
+    # Plot Real vs Predicted and Residuals
+    fig, axs = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Real vs Predicted
+    axs[0].scatter(Y_test, y_pred, alpha=0.5, color='blue')
+    axs[0].plot([Y_test.min(), Y_test.max()], [Y_test.min(), Y_test.max()], 'k--', lw=2)
+    axs[0].set_title('Real vs Predicted Age - FCNN - 2 LAYERS - NOT REDUCED')
+    axs[0].set_xlabel('Real Age')
+    axs[0].set_ylabel('Predicted Age')
+    axs[0].grid(True)
+    
+    # Residuals
+    residuals = Y_test - y_pred
+    axs[1].scatter(y_pred, residuals, alpha=0.5, color='purple')
+    axs[1].hlines(0, xmin=y_pred.min(), xmax=y_pred.max(), color='purple', linestyle='--')
+    axs[1].set_title('Residuals - FCNN - 2 LAYERS - NOT REDUCED')
+    axs[1].set_xlabel('Predicted Age')
+    axs[1].set_ylabel('Residuals')
+    axs[1].grid(True)
+    
+    plt.show()
+    
+    if config.feature_importances:
+    # Use negative MSE as the scoring function (higher is better)
+        perm_importance = permutation_importance(best_model, X_test, Y_test, scoring=lambda estimator, X, y: -mean_squared_error(y, estimator.predict(X)), n_repeats=30, random_state=config.seed)
+        feature_importances = perm_importance.importances_mean
+        
+        if isinstance(X_test_age, pd.DataFrame):
+            feature_names = X_test_age.columns
+    
+        if feature_names is not None:
+            # Create a DataFrame with feature names and their importances
+            importance_df = pd.DataFrame({'Feature': feature_names, 'Importance': feature_importances})
+            importance_df = importance_df.sort_values('Importance', ascending=False)
+            
+            # Print the feature importances
+            print("Feature Importances:")
+            print(importance_df.head(20))
+            print(importance_df.tail(10))
+        else:
+            print("Feature names not available.")
+        
+        if isinstance(X_train_age, pd.DataFrame):
+            features = X_train_age.columns
+        else:
+            features = np.arange(X_train_age.shape[1])
+    
+        # Ensure the length matches
+        if len(feature_importances) == len(features):
+            importance_df = pd.Series(feature_importances, index=features).sort_values(ascending=False)
+            importance_df_2FCNN_notReduced = importance_df
+    
+            # Plot feature importances
+            plt.figure(figsize=(10, 6))
+            sns.barplot(x=importance_df.head(20), y=importance_df.index[:20], palette='viridis')
+            plt.title('Top 20 Most Important Features in FCNN - TWO LAYERS - NOT REDUCED')
+            plt.xlabel('Absolute Feature Importance')
+            plt.ylabel('Features')
+            plt.show()
+        else:
+            print(f"Warning: Length of feature importances ({len(feature_importances)}) does not match length of features ({len(features)})")
+#%% ###   3.2.  THREE LAYERS FCNN NOT REDUCED
+#%% ###   3.2.1.     3FCNNnr DEFINE MODEL AND HYPERPARAMETERS
+if config.perform_model.fcnn_three_layers:
+    # Define the model function with an additional layer
+    def build_model(units1, units2, units3, dropout1, dropout2, dropout3, l2_reg1, l2_reg2, l2_reg3, learning_rate, decay_steps, decay_rate):
+        tf.random.set_seed(config.seed)
+        model = Sequential()
+        model.add(Input(shape=(X_train.shape[1],)))
+        model.add(Dense(units=units1, activation='relu', kernel_regularizer=l2(l2_reg1)))
+        model.add(Dropout(rate=dropout1))
+        model.add(Dense(units=units2, activation='relu', kernel_regularizer=l2(l2_reg2)))
+        model.add(Dropout(rate=dropout2))
+        model.add(Dense(units=units3, activation='relu', kernel_regularizer=l2(l2_reg3)))
+        model.add(Dropout(rate=dropout3))
+        model.add(Dense(1, activation='linear'))
+        
+            # Create the ExponentialDecay learning rate scheduler
+        lr_schedule = ExponentialDecay(
+            learning_rate,
+            decay_steps=decay_steps,
+            decay_rate=decay_rate,
+            staircase=True
+        )
+        
+        # Pass the learning rate scheduler to the optimizer
+        optimizer = Adam(learning_rate=lr_schedule)
+        
+        model.compile(
+            optimizer = optimizer,
+            loss      = 'mean_squared_error',
+            metrics   = ['mean_absolute_error']
+        )
+        return model
+    
+    # WRAP THE MODEL
+    early_stopping = EarlyStopping(monitor='loss', patience=100, restore_best_weights=True)
+    keras_regressor = KerasRegressor(model=build_model, verbose=0, callbacks=[early_stopping], random_state=config.seed)
+    
+    # DEFINE HYPERPARAMETER GRID
+    param_distributions = {
+        'model__units1': [100],
+        'model__units2': [512],
+        'model__units3': [800],
+        'model__dropout1': [0.5],
+        'model__dropout2': [0.25],
+        'model__dropout3': [0.3],
+        'model__l2_reg1': [0.05],
+        'model__l2_reg2': [0.5],
+        'model__l2_reg3': [0.45],
+        'model__learning_rate': [0.0005],
+        'model__decay_steps': [1000],
+        'model__decay_rate': [0.95],
+        'batch_size': [32],
+        'epochs': [5000]
+    }
+
+
+#%% ###   3.2.2.     3FCNNnr PERFORM HYPERPARAMETER TUNING WITH CROSS-VALIDATION
+if config.perform_model.fcnn_three_layers:
+    set_seeds(config.seed)
+    
+    random_search_3FCNN_notReduced = perform_randomized_search(param_distributions, 
+                                              keras_regressor, 
+                                              n_iter=calculate_n_iter(param_distributions), 
+                                              #n_iter=4, 
+                                              cv=5, 
+                                              seed=config.seed, 
+                                              X_train=X_train, 
+                                              y_train=Y_train) 
+    
+    
+    best_3FCNN_params_notReduced, sorted_3FCNN_results_notReduced = extract_results_and_plot(random_search_3FCNN_notReduced, param_distributions)
+    
+    # best_3FCNN_params = {'model__units3': 800, 'model__units2': 512, 'model__units1': 100, 'model__learning_rate': 0.001, 'model__l2_reg3': 0.45, 'model__l2_reg2': 0.5, 'model__l2_reg1': 0.05, 'model__dropout3': 0.3, 'model__dropout2': 0.25, 'model__dropout1': 0.5, 'epochs': 5000, 'batch_size': 32}
+    
+    #	mean_test_score = 0.841227
+
+
+#%% ###   3.2.3.     3FCNNnr EVALUATE THE BEST MODEL ON TEST DATA
+if config.perform_model.fcnn_three_layers:
+    best_hps = random_search_3FCNN_notReduced.best_params_
+    print("Best Hyperparameters:", best_hps)
+
+if config.perform_model.fcnn_three_layers:
+    best_model = random_search_3FCNN_notReduced.best_estimator_.model_
+    test_loss, test_mae = best_model.evaluate(X_test, Y_test, verbose=1)
+    print(f'Test Mean Squared Error (MSE): {test_loss}')
+    print(f'Test Mean Absolute Error (MAE): {test_mae}')
+    
+    # Make predictions
+    y_pred = best_model.predict(X_test).flatten()
+    
+    # Ensure predictions are one-dimensional
+    if y_pred.ndim != 1:
+        raise ValueError("Predicted values (y_pred) must be one-dimensional")
+    
+    # Performance metrics
+    mse = mean_squared_error(Y_test, y_pred)
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(Y_test, y_pred)
+    r2 = r2_score(Y_test, y_pred)
+    
+    print(f'Test Mean Squared Error (MSE): {mse}')
+    print(f'Test Root Mean Squared Error (RMSE): {rmse}')
+    print(f'Test Mean Absolute Error (MAE): {mae}')
+    print(f'Test R-squared (R²): {r2}')
+    
+    # Plot Real vs Predicted and Residuals
+    fig, axs = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Real vs Predicted
+    axs[0].scatter(Y_test, y_pred, alpha=0.5, color='blue')
+    axs[0].plot([Y_test.min(), Y_test.max()], [Y_test.min(), Y_test.max()], 'k--', lw=2)
+    axs[0].set_title('Real vs Predicted Age - FCNN - 3 LAYERS - NOT REDUCED')
+    axs[0].set_xlabel('Real Age')
+    axs[0].set_ylabel('Predicted Age')
+    axs[0].grid(True)
+    
+    # Residuals
+    residuals = Y_test - y_pred
+    axs[1].scatter(y_pred, residuals, alpha=0.5, color='purple')
+    axs[1].hlines(0, xmin=y_pred.min(), xmax=y_pred.max(), color='purple', linestyle='--')
+    axs[1].set_title('Residuals - FCNN - 3 LAYERS - NOT REDUCED')
+    axs[1].set_xlabel('Predicted Age')
+    axs[1].set_ylabel('Residuals')
+    axs[1].grid(True)
+    
+    plt.show()
+    
+    if config.feature_importances:
+    # Use negative MSE as the scoring function (higher is better)
+        perm_importance = permutation_importance(best_model, X_test, Y_test, scoring=lambda estimator, X, y: -mean_squared_error(y, estimator.predict(X)), n_repeats=30, random_state=config.seed)
+        feature_importances = perm_importance.importances_mean
+        
+        if isinstance(X_test_age, pd.DataFrame):
+            feature_names = X_test_age.columns
+    
+        if feature_names is not None:
+            # Create a DataFrame with feature names and their importances
+            importance_df = pd.DataFrame({'Feature': feature_names, 'Importance': feature_importances})
+            importance_df = importance_df.sort_values('Importance', ascending=False)
+            
+            # Print the feature importances
+            print("Feature Importances:")
+            print(importance_df.head(20))
+            print(importance_df.tail(10))
+        else:
+            print("Feature names not available.")
+        
+        if isinstance(X_train_age, pd.DataFrame):
+            features = X_train_age.columns
+        else:
+            features = np.arange(X_train_age.shape[1])
+    
+        # Ensure the length matches
+        if len(feature_importances) == len(features):
+            importance_df = pd.Series(feature_importances, index=features).sort_values(ascending=False)
+            importance_df_3FCNN_notReduced = importance_df
+    
+            # Plot feature importances
+            plt.figure(figsize=(10, 6))
+            sns.barplot(x=importance_df.head(20), y=importance_df.index[:20], palette='viridis')
+            plt.title('Top 20 Most Important Features in FCNN - THREE LAYERS - NOT REDUCED')
+            plt.xlabel('Absolute Feature Importance')
+            plt.ylabel('Features')
+            plt.show()
+        else:
+            print(f"Warning: Length of feature importances ({len(feature_importances)}) does not match length of features ({len(features)})")
+#%% ###   4.    FCNN REDUCED LASSO
+#%% ###   4.b   TRANSFORM REDUCED LASSO VARIABLES INTO CORRECT SHAPES FOR FCNN ###
+
+# Create two new variables for name clarity
+X_train_age_reduced_lasso = X_train_age_reduced
+X_test_age_reduced_lasso  = X_test_age_reduced
+
+# Convert dataframes to numpy arrays
+X_train_reduced_lasso = X_train_age_reduced_lasso.values
+Y_train = y_train_age.values
+X_test_reduced_lasso = X_test_age_reduced_lasso.values
+Y_test = y_test_age.values
+
+# Ensure target arrays are one-dimensional
+if Y_train.ndim != 1 or Y_test.ndim != 1:
+    raise ValueError("Target arrays (Y_train and Y_test) must be one-dimensional")
+
+#%% ###   4.1.  TWO LAYERS FCNN REDUCED LASSO #####
+#%% ###   4.1.1.     2FCNNrL DEFINE MODEL AND HYPERPARAMETERS
+if config.perform_model.fcnn_two_layers:
+    def build_model(units1, units2, dropout1, dropout2, l2_reg1, l2_reg2, learning_rate, decay_steps, decay_rate):
+        tf.random.set_seed(config.seed)
+        model = Sequential()
+        model.add(Input(shape=(X_train_reduced_lasso.shape[1],)))
+        model.add(Dense(units=units1, activation='relu', kernel_regularizer=l2(l2_reg1)))
+        model.add(Dropout(rate=dropout1))
+        model.add(Dense(units=units2, activation='relu', kernel_regularizer=l2(l2_reg2)))
+        model.add(Dropout(rate=dropout2))
+        model.add(Dense(1, activation='linear'))
+        
+            # Create the ExponentialDecay learning rate scheduler
+        lr_schedule = ExponentialDecay(
+            learning_rate,
+            decay_steps=decay_steps,
+            decay_rate=decay_rate,
+            staircase=True
+        )
+        
+        # Pass the learning rate scheduler to the optimizer
+        optimizer = Adam(learning_rate=lr_schedule)
+        
+        model.compile(
+            optimizer = optimizer,
+            loss      = 'mean_squared_error',
+            metrics   = ['mean_absolute_error']
+        )
+        return model
+    
+    # Wrap the model
+    early_stopping  = EarlyStopping(monitor='loss', patience=150, restore_best_weights=True)
+    keras_regressor = KerasRegressor(model=build_model, verbose=0, callbacks=[early_stopping], random_state=config.seed)
+    
+    # Define hyperparameters
+    # Note: The parameters for the two and three layer FCNN only present the final distribution of parameters, to show the seed results, as introducing more parameters changes the randomness.
+    param_distributions = {
+        'model__units1': [64],
+        'model__units2': [1024],
+        'model__dropout1': [0.625],
+        'model__dropout2': [0.14],
+        'model__l2_reg1': [0.3],  # L2 regularization strengths
+        'model__l2_reg2': [0.3],  # L2 regularization strengths
+        'model__learning_rate': [0.001],
+        'model__decay_steps': [1000],
+        'model__decay_rate': [0.95],
+        'batch_size': [64],  # Different batch sizes to test
+        'epochs': [50000]  # Max epochs
+    }
+    
+    # # Define hyperparameters
+    # # Note: The parameters for the two and three layer FCNN only present the final distribution of parameters, to show the seed results, as introducing more parameters changes the randomness.
+    # param_distributions = {
+    #     'model__units1': [50,60,64,70,80,90,100,110,120],
+    #     'model__units2': [900,1000,1024,1050,1100,1150,1200],
+    #     'model__dropout1': [0.625],
+    #     'model__dropout2': [0.14],
+    #     'model__l2_reg1': [0.3],  # L2 regularization strengths
+    #     'model__l2_reg2': [0.3],  # L2 regularization strengths
+    #     'model__learning_rate': [0.0005,0.00075,0.001,0.0015,0.002],
+    #     'model__decay_steps': [1000],
+    #     'model__decay_rate': [0.95],
+    #     'batch_size': [64],  # Different batch sizes to test
+    #     'epochs': [50000]  # Max epochs
+    # }
+
+#%% ###   4.1.2.     2FCNNrL PERFORM HYPERPARAMETER TUNING WITH CROSS-VALIDATION
+if config.perform_model.fcnn_two_layers:
+    set_seeds(config.seed)
+    
+    random_search_2FCNN = perform_randomized_search(param_distributions, 
+                                              keras_regressor, 
+                                              n_iter=calculate_n_iter(param_distributions), 
+                                              #n_iter=4, 
+                                              cv=5, 
+                                              seed=config.seed, 
+                                              X_train=X_train_reduced_lasso, 
+                                              y_train=Y_train) 
+
+    
+    best_2FCNN_params, sorted_2FCNN_results = extract_results_and_plot(random_search_2FCNN, param_distributions)
+    
+    # best_2FCNN_params = {'model__units2': 1024, 'model__units1': 64, 'model__learning_rate': 0.001, 'model__l2_reg2': 0.3, 'model__l2_reg1': 0.3, 'model__dropout2': 0.14, 'model__dropout1': 0.625, 'model__decay_steps': 1000, 'model__decay_rate': 0.95, 'epochs': 50000, 'batch_size': 64}
+    # mean_test_score = 0.863904
+
+
+#%% ###   4.1.3.     2FCNNrL EVALUATE THE BEST MODEL ON TEST DATA
+if config.perform_model.fcnn_two_layers:
+    best_hps = random_search_2FCNN.best_params_
+    print("Best Hyperparameters:", best_hps)
+    
+    best_model = random_search_2FCNN.best_estimator_.model_
+    
+    test_loss, test_mae = best_model.evaluate(X_test_reduced_lasso, Y_test, verbose=1)
+    print(f'Test Mean Squared Error (MSE): {test_loss}')
+    print(f'Test Mean Absolute Error (MAE): {test_mae}')
+    
+    # Make predictions
+    y_pred = best_model.predict(X_test_reduced_lasso).flatten()
+    
+    # Ensure predictions are one-dimensional
+    if y_pred.ndim != 1:
+        raise ValueError("Predicted values (y_pred) must be one-dimensional")
+    
+    # Performance metrics
+    mse = mean_squared_error(Y_test, y_pred)
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(Y_test, y_pred)
+    r2 = r2_score(Y_test, y_pred)
+    
+    print(f'Test Mean Squared Error (MSE): {mse}')
+    print(f'Test Root Mean Squared Error (RMSE): {rmse}')
+    print(f'Test Mean Absolute Error (MAE): {mae}')
+    print(f'Test R-squared (R²): {r2}')
+    
+    # Plot Real vs Predicted and Residuals
+    fig, axs = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Real vs Predicted
+    axs[0].scatter(Y_test, y_pred, alpha=0.5, color='blue')
+    axs[0].plot([Y_test.min(), Y_test.max()], [Y_test.min(), Y_test.max()], 'k--', lw=2)
+    axs[0].set_title('Real vs Predicted Age - FCNN - 2 LAYERS - REDUCED LASSO')
+    axs[0].set_xlabel('Real Age')
+    axs[0].set_ylabel('Predicted Age')
+    axs[0].grid(True)
+    
+    # # Residuals
+    # residuals = Y_test - y_pred
+    # axs[1].scatter(y_pred, residuals, alpha=0.5, color='purple')
+    # axs[1].hlines(0, xmin=y_pred.min(), xmax=y_pred.max(), color='purple', linestyle='--')
+    # axs[1].set_title('Residuals - FCNN - 2 LAYERS - REDUCED LASSO')
+    # axs[1].set_xlabel('Predicted Age')
+    # axs[1].set_ylabel('Residuals')
+    # axs[1].grid(True)
+    
+    # Residuals Real
+    residuals = Y_test - y_pred
+    axs[1].scatter(Y_test, residuals, alpha=0.5, color='purple')
+    axs[1].hlines(0, xmin=Y_test.min(), xmax=Y_test.max(), color='purple', linestyle='--')
+    axs[1].set_title('Residuals - FCNN - 2 LAYERS - REDUCED LASSO')
+    axs[1].set_xlabel('Real Age')
+    axs[1].set_ylabel('Residuals')
+    axs[1].grid(True)
+    
+    plt.show()
+    
+    if config.feature_importances:
+    # Use negative MSE as the scoring function (higher is better)
+        perm_importance = permutation_importance(best_model, X_test_reduced_lasso, Y_test, scoring=lambda estimator, X, y: -mean_squared_error(y, estimator.predict(X)), n_repeats=30, random_state=config.seed)
+        feature_importances = perm_importance.importances_mean
+        
+        if isinstance(X_test_age_reduced_lasso, pd.DataFrame):
+            feature_names = X_test_age_reduced_lasso.columns
+    
+        if feature_names is not None:
+            # Create a DataFrame with feature names and their importances
+            importance_df = pd.DataFrame({'Feature': feature_names, 'Importance': feature_importances})
+            importance_df = importance_df.sort_values('Importance', ascending=False)
+            
+            # Print the feature importances
+            print("Feature Importances:")
+            print(importance_df.head(20))
+            print(importance_df.tail(10))
+        else:
+            print("Feature names not available.")
+        
+        if isinstance(X_train_age_reduced_lasso, pd.DataFrame):
+            features = X_train_age_reduced_lasso.columns
+        else:
+            features = np.arange(X_train_age_reduced_lasso.shape[1])
+    
+        # Ensure the length matches
+        if len(feature_importances) == len(features):
+            importance_df = pd.Series(feature_importances, index=features).sort_values(ascending=False)
+            importance_df_2FCNN_reducedLasso = importance_df
+    
+            # Plot feature importances
+            plt.figure(figsize=(10, 6))
+            sns.barplot(x=importance_df.head(20), y=importance_df.index[:20], palette='viridis')
+            plt.title('Top 20 Most Important Features in FCNN - TWO LAYERS - REDUCED')
+            plt.xlabel('Absolute Feature Importance')
+            plt.ylabel('Features')
+            plt.show()
+        else:
+            print(f"Warning: Length of feature importances ({len(feature_importances)}) does not match length of features ({len(features)})")
+
+#%% ###   4.2.  THREE LAYERS FCNN REDUCED LASSO
+#%% ###   4.2.1.     3FCNNrL DEFINE MODEL AND HYPERPARAMETERS
+set_seeds(config.seed)
+
+if config.perform_model.fcnn_three_layers:
+    
+    # Define the model function with an additional layer
+    def build_model(units1, units2, units3, dropout1, dropout2, dropout3, l2_reg1, l2_reg2, l2_reg3, learning_rate, decay_steps, decay_rate):
+        tf.random.set_seed(config.seed)
+        model = Sequential()
+        model.add(Input(shape=(X_train_reduced_lasso.shape[1],)))
+        model.add(Dense(units=units1, activation='relu', kernel_regularizer=l2(l2_reg1)))
+        model.add(Dropout(rate=dropout1))
+        model.add(Dense(units=units2, activation='relu', kernel_regularizer=l2(l2_reg2)))
+        model.add(Dropout(rate=dropout2))
+        model.add(Dense(units=units3, activation='relu', kernel_regularizer=l2(l2_reg3)))
+        model.add(Dropout(rate=dropout3))
+        model.add(Dense(1, activation='linear'))
+        
+            # Create the ExponentialDecay learning rate scheduler
+        lr_schedule = ExponentialDecay(
+            learning_rate,
+            decay_steps=decay_steps,
+            decay_rate=decay_rate,
+            staircase=True
+        )
+        
+        # Pass the learning rate scheduler to the optimizer
+        optimizer = Adam(learning_rate=lr_schedule)
+        
+        model.compile(
+            optimizer = optimizer,
+            loss      = 'mean_squared_error',
+            metrics   = ['mean_absolute_error']
+        )
+        return model
+    
+    # Wrap the model
+    early_stopping  = EarlyStopping(monitor='loss', patience=150, restore_best_weights=True)
+    keras_regressor = KerasRegressor(model=build_model, verbose=0, callbacks=[early_stopping], random_state=config.seed)
+    
+    # Define hyperparameters
+    # Note: The parameters for the two and three layer FCNN only present the final distribution of parameters, to show the seed results, as introducing more parameters changes the randomness.
+    param_distributions = {
+        'model__units1': [64],
+        'model__units2': [512],
+        'model__units3': [425],
+        'model__dropout1': [0.6],
+        'model__dropout2': [0.2],
+        'model__dropout3': [0.3],
+        'model__l2_reg1': [0.22],
+        'model__l2_reg2': [0.61],
+        'model__l2_reg3': [0.41],
+        'model__learning_rate': [0.001],
+        'model__decay_steps': [1100],
+        'model__decay_rate': [0.95],
+        'batch_size': [32],  # Different batch sizes to test
+        'epochs': [50000]  # Max epochs
+    }
+
+#%% ###   4.2.2.     3FCNNrL PERFORM HYPERPARAMETER TUNING WITH CROSS-VALIDATION
+
+set_seeds(config.seed)
+
+if config.perform_model.fcnn_three_layers:
+    random_search_3FCNN = perform_randomized_search(param_distributions, 
+                                              keras_regressor, 
+                                              n_iter=calculate_n_iter(param_distributions), 
+                                              #n_iter=4, 
+                                              cv=5, 
+                                              seed=config.seed, 
+                                              X_train=X_train_reduced_lasso, 
+                                              y_train=Y_train) 
+    
+    
+    best_3FCNN_params, sorted_3FCNN_results = extract_results_and_plot(random_search_3FCNN, param_distributions)
+    
+    # best_3FCNN_params = {'model__units3': 425, 'model__units2': 512, 'model__units1': 64, 'model__learning_rate': 0.001, 'model__l2_reg3': 0.41, 'model__l2_reg2': 0.61, 'model__l2_reg1': 0.22, 'model__dropout3': 0.3, 'model__dropout2': 0.2, 'model__dropout1': 0.6, 'model__decay_steps': 1100, 'model__decay_rate': 0.95, 'epochs': 50000, 'batch_size': 32}
+    # mean_test_score = 0.864672
+    
+# Test Mean Squared Error (MSE): 61.88945213354827
+# Test Root Mean Squared Error (RMSE): 7.866984945552411
+# Test Mean Absolute Error (MAE): 5.494975953731897
+# Test R-squared (R²): 0.8717986486088656
+
+#%% ###   4.2.3.     3FCNNrL EVALUATE THE BEST MODEL ON TEST DATA
+if config.perform_model.fcnn_three_layers:
+    best_hps = random_search_3FCNN.best_params_
+    print("Best Hyperparameters:", best_hps)
+
+
+    best_model = random_search_3FCNN.best_estimator_.model_
+    test_loss, test_mae = best_model.evaluate(X_test_reduced_lasso, Y_test, verbose=1)
+    print(f'Test Mean Squared Error (MSE): {test_loss}')
+    print(f'Test Mean Absolute Error (MAE): {test_mae}')
+    
+    # Make predictions
+    y_pred = best_model.predict(X_test_reduced_lasso).flatten()
+    
+    # Ensure predictions are one-dimensional
+    if y_pred.ndim != 1:
+        raise ValueError("Predicted values (y_pred) must be one-dimensional")
+    
+    # Performance metrics
+    mse = mean_squared_error(Y_test, y_pred)
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(Y_test, y_pred)
+    r2 = r2_score(Y_test, y_pred)
+    
+    print(f'Test Mean Squared Error (MSE): {mse}')
+    print(f'Test Root Mean Squared Error (RMSE): {rmse}')
+    print(f'Test Mean Absolute Error (MAE): {mae}')
+    print(f'Test R-squared (R²): {r2}')
+    
+    # Plot Real vs Predicted and Residuals
+    fig, axs = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Real vs Predicted
+    axs[0].scatter(Y_test, y_pred, alpha=0.5, color='blue')
+    axs[0].plot([Y_test.min(), Y_test.max()], [Y_test.min(), Y_test.max()], 'k--', lw=2)
+    axs[0].set_title('Real vs Predicted Age - FCNN - 3 LAYERS - REDUCED LASSO')
+    axs[0].set_xlabel('Real Age')
+    axs[0].set_ylabel('Predicted Age')
+    axs[0].grid(True)
+    
+    # # Residuals
+    # residuals = Y_test - y_pred
+    # axs[1].scatter(y_pred, residuals, alpha=0.5, color='purple')
+    # axs[1].hlines(0, xmin=y_pred.min(), xmax=y_pred.max(), color='purple', linestyle='--')
+    # axs[1].set_title('Residuals - FCNN - 3 LAYERS - REDUCED LASSO')
+    # axs[1].set_xlabel('Predicted Age')
+    # axs[1].set_ylabel('Residuals')
+    # axs[1].grid(True)
+    
+    # Residuals Real
+    residuals = Y_test - y_pred
+    axs[1].scatter(Y_test, residuals, alpha=0.5, color='purple')
+    axs[1].hlines(0, xmin=Y_test.min(), xmax=Y_test.max(), color='purple', linestyle='--')
+    axs[1].set_title('Residuals - FCNN - 3 LAYERS - REDUCED LASSO')
+    axs[1].set_xlabel('Real Age')
+    axs[1].set_ylabel('Residuals')
+    axs[1].grid(True)
+    
+    plt.show()
+    
+    if config.feature_importances:
+    # Use negative MSE as the scoring function (higher is better)
+        perm_importance = permutation_importance(best_model, X_test_reduced_lasso, Y_test, scoring=lambda estimator, X, y: -mean_squared_error(y, estimator.predict(X)), n_repeats=30, random_state=config.seed)
+        feature_importances = perm_importance.importances_mean
+        
+        if isinstance(X_test_age_reduced_lasso, pd.DataFrame):
+            feature_names = X_test_age_reduced_lasso.columns
+    
+        if feature_names is not None:
+            # Create a DataFrame with feature names and their importances
+            importance_df = pd.DataFrame({'Feature': feature_names, 'Importance': feature_importances})
+            importance_df = importance_df.sort_values('Importance', ascending=False)
+            
+            # Print the feature importances
+            print("Feature Importances:")
+            print(importance_df.head(20))
+            print(importance_df.tail(20))
+        else:
+            print("Feature names not available.")
+        
+        if isinstance(X_train_age_reduced_lasso, pd.DataFrame):
+            features = X_train_age_reduced_lasso.columns
+        else:
+            features = np.arange(X_train_age_reduced_lasso.shape[1])
+    
+        # Ensure the length matches
+        if len(feature_importances) == len(features):
+            importance_df = pd.Series(feature_importances, index=features).sort_values(ascending=False)
+            # importance_df = abs(importance_df)
+    
+            # Plot feature importances
+            plt.figure(figsize=(10, 6))
+            sns.barplot(x=importance_df.head(20), y=importance_df.index[:20], palette='viridis')
+            plt.title('Top 20 Most Important Features in FCNN - THREE LAYERS -  REDUCED')
+            plt.xlabel('Absolute Feature Importance')
+            plt.ylabel('Features')
+            plt.show()
+        else:
+            print(f"Warning: Length of feature importances ({len(feature_importances)}) does not match length of features ({len(features)})")
